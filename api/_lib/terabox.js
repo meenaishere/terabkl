@@ -1,26 +1,61 @@
 const axios = require('axios');
 
-const BASE_URL = 'https://www.1024terabox.com';
+/**
+ * Get base URL from share URL
+ */
+function getBaseUrl(shareUrl) {
+    if (shareUrl.includes('1024tera.com')) {
+        return 'https://www.1024tera.com';
+    } else if (shareUrl.includes('1024terabox.com')) {
+        return 'https://www.1024terabox.com';
+    } else if (shareUrl.includes('teraboxapp.com')) {
+        return 'https://www.teraboxapp.com';
+    } else if (shareUrl.includes('freeterabox.com')) {
+        return 'https://www.freeterabox.com';
+    } else if (shareUrl.includes('terabox.com')) {
+        return 'https://www.terabox.com';
+    }
+    return 'https://www.terabox.com';
+}
 
-function getHeaders() {
+/**
+ * Get headers for requests
+ */
+function getHeaders(baseUrl, extraCookie = '') {
+    const cookie = process.env.TERABOX_COOKIE || '';
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': BASE_URL + '/',
-        'Origin': BASE_URL,
-        'Cookie': process.env.TERABOX_COOKIE || ''
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cookie': cookie + (extraCookie ? '; ' + extraCookie : '')
     };
 }
 
 /**
- * Extract share code from TeraBox URL - FIXED VERSION
+ * Get API headers
+ */
+function getApiHeaders(baseUrl, referer) {
+    const cookie = process.env.TERABOX_COOKIE || '';
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': referer,
+        'Origin': baseUrl,
+        'Cookie': cookie,
+        'X-Requested-With': 'XMLHttpRequest'
+    };
+}
+
+/**
+ * Extract share code from URL
  */
 function extractShareCode(url) {
     if (!url) throw new Error('URL is required');
     
-    // Pattern to match share code (keep the full code including leading 1)
     const patterns = [
         /\/s\/(1[a-zA-Z0-9_-]+)/i,
         /surl=(1[a-zA-Z0-9_-]+)/i,
@@ -30,14 +65,10 @@ function extractShareCode(url) {
 
     for (const pattern of patterns) {
         const match = url.match(pattern);
-        if (match) {
-            return match[1];
-        }
+        if (match) return match[1];
     }
     
-    if (/^[a-zA-Z0-9_-]+$/.test(url)) {
-        return url;
-    }
+    if (/^1?[a-zA-Z0-9_-]+$/.test(url)) return url;
     
     throw new Error('Invalid TeraBox URL format');
 }
@@ -60,17 +91,97 @@ function formatSize(bytes) {
 }
 
 /**
+ * First visit the page to get necessary cookies and tokens
+ */
+async function initSession(shareUrl) {
+    const baseUrl = getBaseUrl(shareUrl);
+    const surl = extractShareCode(shareUrl);
+    
+    try {
+        // Visit the share page first
+        const pageResponse = await axios.get(`${baseUrl}/s/${surl}`, {
+            headers: getHeaders(baseUrl),
+            timeout: 15000,
+            maxRedirects: 5
+        });
+
+        // Extract cookies from response
+        const setCookies = pageResponse.headers['set-cookie'] || [];
+        let extraCookies = '';
+        
+        setCookies.forEach(cookie => {
+            const match = cookie.match(/^([^=]+)=([^;]+)/);
+            if (match) {
+                extraCookies += `${match[1]}=${match[2]}; `;
+            }
+        });
+
+        // Try to extract jsToken from page
+        const html = pageResponse.data;
+        const jsTokenMatch = html.match(/window\.jsToken\s*=\s*["']([^"']+)["']/);
+        const jsToken = jsTokenMatch ? jsTokenMatch[1] : null;
+
+        // Extract other useful data
+        const signMatch = html.match(/"sign":"([^"]+)"/);
+        const timestampMatch = html.match(/"timestamp":(\d+)/);
+        const shareIdMatch = html.match(/"shareid":(\d+)/);
+        const ukMatch = html.match(/"uk":(\d+)/);
+
+        return {
+            baseUrl,
+            surl,
+            extraCookies,
+            jsToken,
+            sign: signMatch ? signMatch[1] : null,
+            timestamp: timestampMatch ? timestampMatch[1] : null,
+            shareid: shareIdMatch ? shareIdMatch[1] : null,
+            uk: ukMatch ? ukMatch[1] : null
+        };
+    } catch (error) {
+        return {
+            baseUrl,
+            surl,
+            extraCookies: '',
+            jsToken: null
+        };
+    }
+}
+
+/**
  * Get share info
  */
 async function getShareInfo(shareUrl) {
-    const surl = extractShareCode(shareUrl);
+    const session = await initSession(shareUrl);
+    const { baseUrl, surl, extraCookies } = session;
+
+    // If we got data from page, use it
+    if (session.shareid && session.uk && session.sign) {
+        return {
+            shareid: session.shareid,
+            uk: session.uk,
+            sign: session.sign,
+            timestamp: session.timestamp,
+            surl: surl,
+            baseUrl: baseUrl,
+            jsToken: session.jsToken
+        };
+    }
     
-    const response = await axios.get(`${BASE_URL}/api/shorturlinfo`, {
+    // Otherwise call API
+    const cookie = process.env.TERABOX_COOKIE || '';
+    const fullCookie = cookie + (extraCookies ? '; ' + extraCookies : '');
+
+    const response = await axios.get(`${baseUrl}/api/shorturlinfo`, {
         params: {
             shorturl: surl,
             root: 1
         },
-        headers: getHeaders(),
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': `${baseUrl}/s/${surl}`,
+            'Cookie': fullCookie
+        },
         timeout: 15000
     });
 
@@ -86,7 +197,8 @@ async function getShareInfo(shareUrl) {
         sign: data.sign,
         timestamp: data.timestamp,
         surl: surl,
-        title: data.title
+        baseUrl: baseUrl,
+        jsToken: session.jsToken
     };
 }
 
@@ -95,10 +207,11 @@ async function getShareInfo(shareUrl) {
  */
 async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
     const shareInfo = await getShareInfo(shareUrl);
+    const { baseUrl, surl } = shareInfo;
     
-    const response = await axios.get(`${BASE_URL}/share/list`, {
+    const response = await axios.get(`${baseUrl}/share/list`, {
         params: {
-            shorturl: shareInfo.surl,
+            shorturl: surl,
             dir: path,
             root: path === '/' ? 1 : 0,
             page: page,
@@ -106,7 +219,7 @@ async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
             order: 'time',
             desc: 1
         },
-        headers: getHeaders(),
+        headers: getApiHeaders(baseUrl, `${baseUrl}/s/${surl}`),
         timeout: 15000
     });
 
@@ -144,21 +257,28 @@ async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
  */
 async function getDownloadLink(shareUrl, fsId) {
     const shareInfo = await getShareInfo(shareUrl);
+    const { baseUrl, surl } = shareInfo;
     
     // Method 1: Download endpoint
     try {
-        const response = await axios.get(`${BASE_URL}/share/download`, {
-            params: {
-                shareid: shareInfo.shareid,
-                uk: shareInfo.uk,
-                sign: shareInfo.sign,
-                timestamp: shareInfo.timestamp,
-                fid_list: JSON.stringify([Number(fsId)]),
-                primaryid: shareInfo.shareid,
-                product: 'share',
-                nozip: 0
-            },
-            headers: getHeaders(),
+        const params = {
+            shareid: shareInfo.shareid,
+            uk: shareInfo.uk,
+            sign: shareInfo.sign,
+            timestamp: shareInfo.timestamp,
+            fid_list: JSON.stringify([Number(fsId)]),
+            primaryid: shareInfo.shareid,
+            product: 'share',
+            nozip: 0
+        };
+
+        if (shareInfo.jsToken) {
+            params.jsToken = shareInfo.jsToken;
+        }
+
+        const response = await axios.get(`${baseUrl}/share/download`, {
+            params,
+            headers: getApiHeaders(baseUrl, `${baseUrl}/s/${surl}`),
             timeout: 15000
         });
 
@@ -170,17 +290,13 @@ async function getDownloadLink(shareUrl, fsId) {
                 sizeFormatted: formatSize(response.data.size || 0)
             };
         }
-    } catch (e) {
-        // Continue
-    }
+    } catch (e) {}
 
     // Method 2: Get from file list
     const fileList = await getFileList(shareUrl);
     const file = fileList.files.find(f => f.fs_id === fsId.toString());
     
-    if (!file) {
-        throw new Error('File not found');
-    }
+    if (!file) throw new Error('File not found');
 
     if (file.dlink) {
         return {
@@ -193,15 +309,15 @@ async function getDownloadLink(shareUrl, fsId) {
 
     // Method 3: Filemetas
     try {
-        const metaResponse = await axios.get(`${BASE_URL}/api/filemetas`, {
+        const metaResponse = await axios.get(`${baseUrl}/api/filemetas`, {
             params: {
                 dlink: 1,
                 target: JSON.stringify([file.path]),
-                shorturl: shareInfo.surl,
+                shorturl: surl,
                 shareid: shareInfo.shareid,
                 uk: shareInfo.uk
             },
-            headers: getHeaders(),
+            headers: getApiHeaders(baseUrl, `${baseUrl}/s/${surl}`),
             timeout: 15000
         });
 
@@ -213,9 +329,7 @@ async function getDownloadLink(shareUrl, fsId) {
                 sizeFormatted: file.sizeFormatted
             };
         }
-    } catch (e) {
-        // Continue
-    }
+    } catch (e) {}
 
     throw new Error('Could not get download link');
 }
@@ -225,12 +339,14 @@ async function getDownloadLink(shareUrl, fsId) {
  */
 async function getDirectLink(shareUrl, fsId) {
     const result = await getDownloadLink(shareUrl, fsId);
+    const baseUrl = getBaseUrl(shareUrl);
     
     try {
         const response = await axios.head(result.downloadUrl, {
             headers: {
-                ...getHeaders(),
-                'Range': 'bytes=0-1'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Range': 'bytes=0-1',
+                'Cookie': process.env.TERABOX_COOKIE || ''
             },
             maxRedirects: 10,
             validateStatus: (status) => status < 400,
@@ -260,7 +376,10 @@ async function getDirectLink(shareUrl, fsId) {
 async function streamFile(shareUrl, fsId, rangeHeader = null) {
     const result = await getDownloadLink(shareUrl, fsId);
     
-    const headers = getHeaders();
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Cookie': process.env.TERABOX_COOKIE || ''
+    };
     if (rangeHeader) headers['Range'] = rangeHeader;
 
     const response = await axios.get(result.downloadUrl, {
@@ -293,5 +412,5 @@ module.exports = {
     getDownloadLink,
     getDirectLink,
     streamFile,
-    getHeaders
+    getBaseUrl
 };
