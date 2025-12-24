@@ -2,47 +2,39 @@ const axios = require('axios');
 
 const BASE_URL = 'https://www.1024terabox.com';
 
-const DEFAULT_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://www.terabox.com/',
-    'Origin': 'https://www.terabox.com',
-    'Connection': 'keep-alive',
-    'Cookie': process.env.TERABOX_COOKIE || ''
-};
+function getHeaders() {
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': BASE_URL + '/',
+        'Origin': BASE_URL,
+        'Cookie': process.env.TERABOX_COOKIE || ''
+    };
+}
 
 /**
- * Extract share code from TeraBox URL
+ * Extract share code from TeraBox URL - FIXED VERSION
  */
 function extractShareCode(url) {
     if (!url) throw new Error('URL is required');
     
+    // Pattern to match share code (keep the full code including leading 1)
     const patterns = [
-        /terabox\.com\/s\/([a-zA-Z0-9_-]+)/,
-        /teraboxapp\.com\/s\/([a-zA-Z0-9_-]+)/,
-        /1024tera\.com\/s\/([a-zA-Z0-9_-]+)/,
-        /terabox\.com\/wap\/share\/filelist\?surl=([a-zA-Z0-9_-]+)/,
-        /freeterabox\.com\/s\/([a-zA-Z0-9_-]+)/,
-        /terabox\.fun\/s\/([a-zA-Z0-9_-]+)/,
-        /surl=([a-zA-Z0-9_-]+)/,
-        /\/s\/1([a-zA-Z0-9_-]+)/
+        /\/s\/(1[a-zA-Z0-9_-]+)/i,
+        /surl=(1[a-zA-Z0-9_-]+)/i,
+        /\/s\/([a-zA-Z0-9_-]+)/i,
+        /surl=([a-zA-Z0-9_-]+)/i,
     ];
 
     for (const pattern of patterns) {
         const match = url.match(pattern);
         if (match) {
-            let code = match[1];
-            // Remove leading '1' if present (some URLs have it)
-            if (code.startsWith('1') && code.length > 20) {
-                code = code.substring(1);
-            }
-            return code;
+            return match[1];
         }
     }
     
-    // If it's just the code
     if (/^[a-zA-Z0-9_-]+$/.test(url)) {
         return url;
     }
@@ -68,7 +60,7 @@ function formatSize(bytes) {
 }
 
 /**
- * Get share info from short URL
+ * Get share info
  */
 async function getShareInfo(shareUrl) {
     const surl = extractShareCode(shareUrl);
@@ -78,7 +70,8 @@ async function getShareInfo(shareUrl) {
             shorturl: surl,
             root: 1
         },
-        headers: DEFAULT_HEADERS
+        headers: getHeaders(),
+        timeout: 15000
     });
 
     const data = response.data;
@@ -93,13 +86,12 @@ async function getShareInfo(shareUrl) {
         sign: data.sign,
         timestamp: data.timestamp,
         surl: surl,
-        title: data.title,
-        description: data.description
+        title: data.title
     };
 }
 
 /**
- * Get file list from shared folder
+ * Get file list
  */
 async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
     const shareInfo = await getShareInfo(shareUrl);
@@ -114,7 +106,8 @@ async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
             order: 'time',
             desc: 1
         },
-        headers: DEFAULT_HEADERS
+        headers: getHeaders(),
+        timeout: 15000
     });
 
     const data = response.data;
@@ -147,12 +140,12 @@ async function getFileList(shareUrl, path = '/', page = 1, limit = 100) {
 }
 
 /**
- * Get download link for a file
+ * Get download link
  */
 async function getDownloadLink(shareUrl, fsId) {
     const shareInfo = await getShareInfo(shareUrl);
     
-    // Method 1: Try share/download endpoint
+    // Method 1: Download endpoint
     try {
         const response = await axios.get(`${BASE_URL}/share/download`, {
             params: {
@@ -160,23 +153,25 @@ async function getDownloadLink(shareUrl, fsId) {
                 uk: shareInfo.uk,
                 sign: shareInfo.sign,
                 timestamp: shareInfo.timestamp,
-                fid_list: JSON.stringify([fsId]),
+                fid_list: JSON.stringify([Number(fsId)]),
                 primaryid: shareInfo.shareid,
                 product: 'share',
                 nozip: 0
             },
-            headers: DEFAULT_HEADERS
+            headers: getHeaders(),
+            timeout: 15000
         });
 
         if (response.data.errno === 0 && response.data.dlink) {
             return {
                 downloadUrl: response.data.dlink,
                 filename: response.data.filename || 'download',
-                size: response.data.size || 0
+                size: response.data.size || 0,
+                sizeFormatted: formatSize(response.data.size || 0)
             };
         }
     } catch (e) {
-        // Continue to next method
+        // Continue
     }
 
     // Method 2: Get from file list
@@ -191,80 +186,89 @@ async function getDownloadLink(shareUrl, fsId) {
         return {
             downloadUrl: file.dlink,
             filename: file.filename,
-            size: file.size
+            size: file.size,
+            sizeFormatted: file.sizeFormatted
         };
     }
 
-    // Method 3: Try filemetas endpoint
-    const metaResponse = await axios.get(`${BASE_URL}/api/filemetas`, {
-        params: {
-            dlink: 1,
-            target: JSON.stringify([file.path]),
-            shorturl: shareInfo.surl,
-            shareid: shareInfo.shareid,
-            uk: shareInfo.uk
-        },
-        headers: DEFAULT_HEADERS
-    });
+    // Method 3: Filemetas
+    try {
+        const metaResponse = await axios.get(`${BASE_URL}/api/filemetas`, {
+            params: {
+                dlink: 1,
+                target: JSON.stringify([file.path]),
+                shorturl: shareInfo.surl,
+                shareid: shareInfo.shareid,
+                uk: shareInfo.uk
+            },
+            headers: getHeaders(),
+            timeout: 15000
+        });
 
-    if (metaResponse.data.errno === 0 && metaResponse.data.info?.[0]?.dlink) {
-        return {
-            downloadUrl: metaResponse.data.info[0].dlink,
-            filename: file.filename,
-            size: file.size
-        };
+        if (metaResponse.data.errno === 0 && metaResponse.data.info?.[0]?.dlink) {
+            return {
+                downloadUrl: metaResponse.data.info[0].dlink,
+                filename: file.filename,
+                size: file.size,
+                sizeFormatted: file.sizeFormatted
+            };
+        }
+    } catch (e) {
+        // Continue
     }
 
-    throw new Error('Could not retrieve download link');
+    throw new Error('Could not get download link');
 }
 
 /**
- * Get direct/resolved download link
+ * Get direct link
  */
 async function getDirectLink(shareUrl, fsId) {
-    const { downloadUrl, filename, size } = await getDownloadLink(shareUrl, fsId);
+    const result = await getDownloadLink(shareUrl, fsId);
     
-    // Follow redirects to get final URL
-    const response = await axios.head(downloadUrl, {
-        headers: {
-            ...DEFAULT_HEADERS,
-            'Range': 'bytes=0-1'
-        },
-        maxRedirects: 10,
-        validateStatus: (status) => status < 400
-    });
+    try {
+        const response = await axios.head(result.downloadUrl, {
+            headers: {
+                ...getHeaders(),
+                'Range': 'bytes=0-1'
+            },
+            maxRedirects: 10,
+            validateStatus: (status) => status < 400,
+            timeout: 15000
+        });
 
-    const finalUrl = response.request?.res?.responseUrl || 
-                     response.request?._redirectable?._currentUrl ||
-                     downloadUrl;
+        const finalUrl = response.request?.res?.responseUrl || 
+                         response.request?._redirectable?._currentUrl ||
+                         result.downloadUrl;
 
-    return {
-        directUrl: finalUrl,
-        downloadUrl: downloadUrl,
-        filename,
-        size,
-        sizeFormatted: formatSize(size),
-        contentType: response.headers['content-type']
-    };
+        return {
+            directUrl: finalUrl,
+            downloadUrl: result.downloadUrl,
+            filename: result.filename,
+            size: result.size,
+            sizeFormatted: result.sizeFormatted,
+            contentType: response.headers['content-type']
+        };
+    } catch (e) {
+        return { directUrl: result.downloadUrl, ...result };
+    }
 }
 
 /**
- * Stream file with range support
+ * Stream file
  */
 async function streamFile(shareUrl, fsId, rangeHeader = null) {
-    const { downloadUrl, filename, size } = await getDownloadLink(shareUrl, fsId);
+    const result = await getDownloadLink(shareUrl, fsId);
     
-    const headers = { ...DEFAULT_HEADERS };
-    
-    if (rangeHeader) {
-        headers['Range'] = rangeHeader;
-    }
+    const headers = getHeaders();
+    if (rangeHeader) headers['Range'] = rangeHeader;
 
-    const response = await axios.get(downloadUrl, {
+    const response = await axios.get(result.downloadUrl, {
         headers,
         responseType: 'stream',
         maxRedirects: 10,
-        validateStatus: (status) => status < 400
+        validateStatus: (status) => status < 400,
+        timeout: 30000
     });
 
     return {
@@ -273,7 +277,7 @@ async function streamFile(shareUrl, fsId, rangeHeader = null) {
         headers: {
             'Content-Type': response.headers['content-type'] || 'application/octet-stream',
             'Content-Length': response.headers['content-length'],
-            'Content-Disposition': `attachment; filename="${encodeURIComponent(filename)}"`,
+            'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
             'Accept-Ranges': 'bytes',
             'Content-Range': response.headers['content-range'],
             'Cache-Control': 'public, max-age=3600'
@@ -289,5 +293,5 @@ module.exports = {
     getDownloadLink,
     getDirectLink,
     streamFile,
-    DEFAULT_HEADERS
+    getHeaders
 };
